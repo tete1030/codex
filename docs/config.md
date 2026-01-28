@@ -28,6 +28,36 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
 
+## Prompt controls
+
+Codex supports prompt logging, prompt-layer toggles, and regex rewrites via the `prompt` table in
+`config.toml`:
+
+```toml
+[prompt]
+log_path = "/tmp/codex-prompts.jsonl"
+
+[prompt.layers]
+base_instructions = true
+developer_instructions = true
+user_instructions = true
+tool_schemas = true
+environment_context = true
+system_reminder = true
+
+[[prompt.rewrite]]
+pattern = "foo"
+replace = "bar"
+```
+
+## Responses streaming
+
+Control whether Responses API requests are streamed (HTTP/WS). Defaults to `true`.
+
+```toml
+responses_stream = true
+```
+
 ## Notices
 
 Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.

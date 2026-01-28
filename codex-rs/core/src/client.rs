@@ -1,3 +1,6 @@
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -5,6 +8,7 @@ use crate::api_bridge::CoreAuthProvider;
 use crate::api_bridge::auth_provider_from_auth;
 use crate::api_bridge::map_api_error;
 use crate::auth::UnauthorizedRecovery;
+use chrono::Utc;
 use codex_api::AggregateStreamExt;
 use codex_api::ChatClient as ApiChatClient;
 use codex_api::CompactClient as ApiCompactClient;
@@ -33,6 +37,7 @@ use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -43,8 +48,10 @@ use futures::StreamExt;
 use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode as HttpStatusCode;
+use regex::Regex;
 use reqwest::StatusCode;
 use serde_json::Value;
+use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -55,6 +62,8 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::config::Config;
+use crate::config::types::PromptLayersConfig;
+use crate::config::types::PromptRewriteRule;
 use crate::default_client::build_reqwest_client;
 use crate::error::CodexErr;
 use crate::error::Result;
@@ -68,6 +77,14 @@ use crate::tools::spec::create_tools_json_for_responses_api;
 
 pub const WEB_SEARCH_ELIGIBLE_HEADER: &str = "x-oai-web-search-eligible";
 pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
+
+#[derive(Debug, Clone)]
+struct PromptLogContext {
+    path: PathBuf,
+    model: String,
+    provider: String,
+    wire_api: WireApi,
+}
 
 #[derive(Debug)]
 struct ModelClientState {
@@ -244,6 +261,20 @@ impl ModelClient {
 }
 
 impl ModelClientSession {
+    fn prompt_log_context(&self) -> Option<PromptLogContext> {
+        self.state
+            .config
+            .prompt
+            .log_path
+            .as_ref()
+            .map(|path| PromptLogContext {
+                path: path.clone(),
+                model: self.state.model_info.slug.clone(),
+                provider: self.state.provider.name.clone(),
+                wire_api: self.state.provider.wire_api,
+            })
+    }
+
     /// Streams a single model turn using either the Responses or Chat
     /// Completions wire API, depending on the configured provider.
     ///
@@ -255,16 +286,19 @@ impl ModelClientSession {
             WireApi::ResponsesWebsocket => self.stream_responses_websocket(prompt).await,
             WireApi::Chat => {
                 let api_stream = self.stream_chat_completions(prompt).await?;
+                let log_context = self.prompt_log_context();
 
                 if self.state.config.show_raw_agent_reasoning {
                     Ok(map_response_stream(
                         api_stream.streaming_mode(),
                         self.state.otel_manager.clone(),
+                        log_context,
                     ))
                 } else {
                     Ok(map_response_stream(
                         api_stream.aggregate(),
                         self.state.otel_manager.clone(),
+                        log_context,
                     ))
                 }
             }
@@ -273,8 +307,18 @@ impl ModelClientSession {
 
     fn build_responses_request(&self, prompt: &Prompt) -> Result<ApiPrompt> {
         let instructions = prompt.base_instructions.text.clone();
-        let tools_json: Vec<Value> = create_tools_json_for_responses_api(&prompt.tools)?;
-        Ok(build_api_prompt(prompt, instructions, tools_json))
+        let tools_json = if self.state.config.prompt.layers.tool_schemas {
+            create_tools_json_for_responses_api(&prompt.tools)?
+        } else {
+            Vec::new()
+        };
+        let mut api_prompt = build_api_prompt(prompt, instructions, tools_json);
+        apply_prompt_filters(&mut api_prompt, &self.state.config.prompt.layers);
+        apply_prompt_rewrites(&mut api_prompt, &self.state.config.prompt.rewrite);
+        if let Some(context) = self.prompt_log_context() {
+            log_prompt_request(&context, &api_prompt);
+        }
+        Ok(api_prompt)
     }
 
     fn build_responses_options(
@@ -333,6 +377,7 @@ impl ModelClientSession {
             extra_headers: build_responses_headers(&self.state.config, Some(&self.turn_state)),
             compression,
             turn_state: Some(Arc::clone(&self.turn_state)),
+            stream: self.state.config.responses_stream,
         }
     }
 
@@ -368,6 +413,7 @@ impl ModelClientSession {
             prompt_cache_key,
             text,
             store_override,
+            stream,
             ..
         } = options;
 
@@ -381,7 +427,7 @@ impl ModelClientSession {
             parallel_tool_calls: api_prompt.parallel_tool_calls,
             reasoning: reasoning.clone(),
             store,
-            stream: true,
+            stream: *stream,
             include: include.clone(),
             prompt_cache_key: prompt_cache_key.clone(),
             text: text.clone(),
@@ -444,8 +490,17 @@ impl ModelClientSession {
 
         let auth_manager = self.state.auth_manager.clone();
         let instructions = prompt.base_instructions.text.clone();
-        let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
-        let api_prompt = build_api_prompt(prompt, instructions, tools_json);
+        let tools_json = if self.state.config.prompt.layers.tool_schemas {
+            create_tools_json_for_chat_completions_api(&prompt.tools)?
+        } else {
+            Vec::new()
+        };
+        let mut api_prompt = build_api_prompt(prompt, instructions, tools_json);
+        apply_prompt_filters(&mut api_prompt, &self.state.config.prompt.layers);
+        apply_prompt_rewrites(&mut api_prompt, &self.state.config.prompt.rewrite);
+        if let Some(context) = self.prompt_log_context() {
+            log_prompt_request(&context, &api_prompt);
+        }
         let conversation_id = self.state.conversation_id.to_string();
         let session_source = self.state.session_source.clone();
 
@@ -499,7 +554,12 @@ impl ModelClientSession {
             let stream =
                 codex_api::stream_from_fixture(path, self.state.provider.stream_idle_timeout())
                     .map_err(map_api_error)?;
-            return Ok(map_response_stream(stream, self.state.otel_manager.clone()));
+            let log_context = self.prompt_log_context();
+            return Ok(map_response_stream(
+                stream,
+                self.state.otel_manager.clone(),
+                log_context,
+            ));
         }
 
         let auth_manager = self.state.auth_manager.clone();
@@ -533,7 +593,12 @@ impl ModelClientSession {
 
             match stream_result {
                 Ok(stream) => {
-                    return Ok(map_response_stream(stream, self.state.otel_manager.clone()));
+                    let log_context = self.prompt_log_context();
+                    return Ok(map_response_stream(
+                        stream,
+                        self.state.otel_manager.clone(),
+                        log_context,
+                    ));
                 }
                 Err(ApiError::Transport(TransportError::Http { status, .. }))
                     if status == StatusCode::UNAUTHORIZED =>
@@ -589,9 +654,11 @@ impl ModelClientSession {
                 .map_err(map_api_error)?;
             self.websocket_last_items = api_prompt.input.clone();
 
+            let log_context = self.prompt_log_context();
             return Ok(map_response_stream(
                 stream_result,
                 self.state.otel_manager.clone(),
+                log_context,
             ));
         }
     }
@@ -623,6 +690,180 @@ fn build_api_prompt(prompt: &Prompt, instructions: String, tools_json: Vec<Value
         parallel_tool_calls: prompt.parallel_tool_calls,
         output_schema: prompt.output_schema.clone(),
     }
+}
+
+fn apply_prompt_filters(prompt: &mut ApiPrompt, layers: &PromptLayersConfig) {
+    if !layers.system_reminder {
+        prompt.input.retain(|item| !is_system_reminder_item(item));
+    }
+}
+
+fn is_system_reminder_item(item: &ResponseItem) -> bool {
+    const SYSTEM_REMINDER_TAG: &str = "<system-reminder>";
+    let ResponseItem::Message { content, .. } = item else {
+        return false;
+    };
+    content.iter().any(|content_item| match content_item {
+        ContentItem::InputText { text } => text.contains(SYSTEM_REMINDER_TAG),
+        ContentItem::InputImage { .. } | ContentItem::OutputText { .. } => false,
+    })
+}
+
+fn apply_prompt_rewrites(prompt: &mut ApiPrompt, rules: &[PromptRewriteRule]) {
+    let compiled = build_rewrite_rules(rules);
+    if compiled.is_empty() {
+        return;
+    }
+
+    apply_rewrites_to_string(&mut prompt.instructions, &compiled);
+    for item in prompt.input.iter_mut() {
+        apply_rewrites_to_response_item(item, &compiled);
+    }
+    for tool in prompt.tools.iter_mut() {
+        apply_rewrites_to_value(tool, &compiled);
+    }
+    if let Some(schema) = prompt.output_schema.as_mut() {
+        apply_rewrites_to_value(schema, &compiled);
+    }
+}
+
+fn build_rewrite_rules(rules: &[PromptRewriteRule]) -> Vec<(Regex, String)> {
+    let mut compiled = Vec::new();
+    for rule in rules {
+        match Regex::new(rule.pattern.as_str()) {
+            Ok(regex) => compiled.push((regex, rule.replace.clone())),
+            Err(err) => {
+                warn!(
+                    pattern = rule.pattern.as_str(),
+                    "invalid prompt rewrite regex: {err}"
+                );
+            }
+        }
+    }
+    compiled
+}
+
+fn apply_rewrites_to_response_item(item: &mut ResponseItem, rules: &[(Regex, String)]) {
+    let Ok(mut value) = serde_json::to_value(&*item) else {
+        return;
+    };
+    apply_rewrites_to_value(&mut value, rules);
+    match serde_json::from_value(value) {
+        Ok(updated) => *item = updated,
+        Err(err) => warn!("prompt rewrite failed for response item: {err}"),
+    }
+}
+
+fn apply_rewrites_to_value(value: &mut Value, rules: &[(Regex, String)]) {
+    match value {
+        Value::String(text) => apply_rewrites_to_string(text, rules),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| apply_rewrites_to_value(item, rules)),
+        Value::Object(map) => map
+            .values_mut()
+            .for_each(|item| apply_rewrites_to_value(item, rules)),
+        _ => {}
+    }
+}
+
+fn apply_rewrites_to_string(text: &mut String, rules: &[(Regex, String)]) {
+    for (regex, replacement) in rules {
+        if regex.is_match(text) {
+            *text = regex
+                .replace_all(text.as_str(), replacement.as_str())
+                .into_owned();
+        }
+    }
+}
+
+fn log_prompt_request(context: &PromptLogContext, prompt: &ApiPrompt) {
+    let payload = json!({
+        "instructions": &prompt.instructions,
+        "input": &prompt.input,
+        "tools": &prompt.tools,
+        "parallel_tool_calls": prompt.parallel_tool_calls,
+        "output_schema": &prompt.output_schema,
+    });
+    write_prompt_log(context, "request", payload);
+}
+
+fn log_response_event(context: &PromptLogContext, event: &ResponseEvent) {
+    let payload = match event {
+        ResponseEvent::Created => json!({ "type": "created" }),
+        ResponseEvent::OutputItemDone(item) => {
+            json!({ "type": "output_item_done", "item": item })
+        }
+        ResponseEvent::OutputItemAdded(item) => {
+            json!({ "type": "output_item_added", "item": item })
+        }
+        ResponseEvent::ServerReasoningIncluded(included) => json!({
+            "type": "server_reasoning_included",
+            "included": included,
+        }),
+        ResponseEvent::Completed {
+            response_id,
+            token_usage,
+        } => json!({
+            "type": "completed",
+            "response_id": response_id,
+            "token_usage": token_usage,
+        }),
+        ResponseEvent::OutputTextDelta(delta) => {
+            json!({ "type": "output_text_delta", "delta": delta })
+        }
+        ResponseEvent::ReasoningSummaryDelta {
+            delta,
+            summary_index,
+        } => json!({
+            "type": "reasoning_summary_delta",
+            "summary_index": summary_index,
+            "delta": delta,
+        }),
+        ResponseEvent::ReasoningContentDelta {
+            delta,
+            content_index,
+        } => json!({
+            "type": "reasoning_content_delta",
+            "content_index": content_index,
+            "delta": delta,
+        }),
+        ResponseEvent::ReasoningSummaryPartAdded { summary_index } => json!({
+            "type": "reasoning_summary_part_added",
+            "summary_index": summary_index,
+        }),
+        ResponseEvent::RateLimits(rate_limits) => {
+            json!({ "type": "rate_limits", "rate_limits": rate_limits })
+        }
+        ResponseEvent::ModelsEtag(etag) => json!({ "type": "models_etag", "etag": etag }),
+    };
+    write_prompt_log(context, "response_event", payload);
+}
+
+fn write_prompt_log(context: &PromptLogContext, kind: &str, payload: Value) {
+    let entry = json!({
+        "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "kind": kind,
+        "model": context.model,
+        "provider": context.provider,
+        "wire_api": format!("{wire_api:?}", wire_api = context.wire_api),
+        "payload": payload,
+    });
+    if let Err(err) = append_json_line(&context.path, &entry) {
+        warn!(
+            path = context.path.display().to_string(),
+            "prompt log write failed: {err}"
+        );
+    }
+}
+
+fn append_json_line(path: &PathBuf, value: &Value) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let serialized = serde_json::to_string(value)?;
+    file.write_all(serialized.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(())
 }
 
 fn experimental_feature_headers(config: &Config) -> ApiHeaderMap {
@@ -672,7 +913,11 @@ fn build_responses_headers(
     headers
 }
 
-fn map_response_stream<S>(api_stream: S, otel_manager: OtelManager) -> ResponseStream
+fn map_response_stream<S>(
+    api_stream: S,
+    otel_manager: OtelManager,
+    log_context: Option<PromptLogContext>,
+) -> ResponseStream
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
         + Unpin
@@ -690,6 +935,15 @@ where
                     response_id,
                     token_usage,
                 }) => {
+                    if let Some(context) = log_context.as_ref() {
+                        log_response_event(
+                            context,
+                            &ResponseEvent::Completed {
+                                response_id: response_id.clone(),
+                                token_usage: token_usage.clone(),
+                            },
+                        );
+                    }
                     if let Some(usage) = &token_usage {
                         otel_manager.sse_event_completed(
                             usage.input_tokens,
@@ -711,6 +965,9 @@ where
                     }
                 }
                 Ok(event) => {
+                    if let Some(context) = log_context.as_ref() {
+                        log_response_event(context, &event);
+                    }
                     if tx_event.send(Ok(event)).await.is_err() {
                         return;
                     }

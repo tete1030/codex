@@ -26,7 +26,6 @@ pub struct ResponsesClient<T: HttpTransport, A: AuthProvider> {
     streaming: StreamingClient<T, A>,
 }
 
-#[derive(Default)]
 pub struct ResponsesOptions {
     pub reasoning: Option<Reasoning>,
     pub include: Vec<String>,
@@ -38,6 +37,25 @@ pub struct ResponsesOptions {
     pub extra_headers: HeaderMap,
     pub compression: Compression,
     pub turn_state: Option<Arc<OnceLock<String>>>,
+    pub stream: bool,
+}
+
+impl Default for ResponsesOptions {
+    fn default() -> Self {
+        Self {
+            reasoning: None,
+            include: Vec::new(),
+            prompt_cache_key: None,
+            text: None,
+            store_override: None,
+            conversation_id: None,
+            session_source: None,
+            extra_headers: HeaderMap::new(),
+            compression: Compression::None,
+            turn_state: None,
+            stream: true,
+        }
+    }
 }
 
 impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
@@ -89,6 +107,7 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
             extra_headers,
             compression,
             turn_state,
+            stream,
         } = options;
 
         let request = ResponsesRequestBuilder::new(model, &prompt.instructions, &prompt.input)
@@ -98,6 +117,7 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
             .include(include)
             .prompt_cache_key(prompt_cache_key)
             .text(text)
+            .stream(stream)
             .conversation(conversation_id)
             .session_source(session_source)
             .store_override(store_override)

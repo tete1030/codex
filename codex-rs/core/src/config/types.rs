@@ -415,6 +415,65 @@ impl Default for OtelConfig {
     }
 }
 
+// ===== Prompt configuration =====
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PromptLayersConfigToml {
+    pub base_instructions: Option<bool>,
+    pub developer_instructions: Option<bool>,
+    pub user_instructions: Option<bool>,
+    pub tool_schemas: Option<bool>,
+    pub environment_context: Option<bool>,
+    pub system_reminder: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptLayersConfig {
+    pub base_instructions: bool,
+    pub developer_instructions: bool,
+    pub user_instructions: bool,
+    pub tool_schemas: bool,
+    pub environment_context: bool,
+    pub system_reminder: bool,
+}
+
+impl Default for PromptLayersConfig {
+    fn default() -> Self {
+        Self {
+            base_instructions: true,
+            developer_instructions: true,
+            user_instructions: true,
+            tool_schemas: true,
+            environment_context: true,
+            system_reminder: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PromptRewriteRule {
+    pub pattern: String,
+    pub replace: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PromptConfigToml {
+    pub log_path: Option<AbsolutePathBuf>,
+    pub layers: Option<PromptLayersConfigToml>,
+    #[serde(default)]
+    pub rewrite: Vec<PromptRewriteRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PromptConfig {
+    pub log_path: Option<PathBuf>,
+    pub layers: PromptLayersConfig,
+    pub rewrite: Vec<PromptRewriteRule>,
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Notifications {

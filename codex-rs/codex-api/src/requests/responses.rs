@@ -36,6 +36,7 @@ pub struct ResponsesRequestBuilder<'a> {
     include: Vec<String>,
     prompt_cache_key: Option<String>,
     text: Option<TextControls>,
+    stream: bool,
     conversation_id: Option<String>,
     session_source: Option<SessionSource>,
     store_override: Option<bool>,
@@ -49,6 +50,7 @@ impl<'a> ResponsesRequestBuilder<'a> {
             model: Some(model),
             instructions: Some(instructions),
             input: Some(input),
+            stream: true,
             ..Default::default()
         }
     }
@@ -75,6 +77,11 @@ impl<'a> ResponsesRequestBuilder<'a> {
 
     pub fn prompt_cache_key(mut self, key: Option<String>) -> Self {
         self.prompt_cache_key = key;
+        self
+    }
+
+    pub fn stream(mut self, enabled: bool) -> Self {
+        self.stream = enabled;
         self
     }
 
@@ -133,7 +140,7 @@ impl<'a> ResponsesRequestBuilder<'a> {
             parallel_tool_calls: self.parallel_tool_calls,
             reasoning: self.reasoning,
             store,
-            stream: true,
+            stream: self.stream,
             include: self.include,
             prompt_cache_key: self.prompt_cache_key,
             text: self.text,

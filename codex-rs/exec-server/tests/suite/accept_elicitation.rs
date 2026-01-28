@@ -144,7 +144,7 @@ prefix_rule(
 }
 
 fn ensure_codex_cli() -> Result<PathBuf> {
-    let codex_cli = codex_utils_cargo_bin::cargo_bin("codex")?;
+    let codex_cli = codex_utils_cargo_bin::cargo_bin("codex-raw")?;
 
     let metadata = codex_cli.metadata().with_context(|| {
         format!(
@@ -154,14 +154,14 @@ fn ensure_codex_cli() -> Result<PathBuf> {
     })?;
     ensure!(
         metadata.is_file(),
-        "expected codex binary at {} to be a file; run `cargo build -p codex-cli --bin codex` before this test",
+        "expected codex binary at {} to be a file; run `cargo build -p codex-cli --bin codex-raw` before this test",
         codex_cli.display()
     );
 
     let mode = metadata.permissions().mode();
     ensure!(
         mode & 0o111 != 0,
-        "codex binary at {} is not executable (mode {mode:o}); run `cargo build -p codex-cli --bin codex` before this test",
+        "codex binary at {} is not executable (mode {mode:o}); run `cargo build -p codex-cli --bin codex-raw` before this test",
         codex_cli.display()
     );
 

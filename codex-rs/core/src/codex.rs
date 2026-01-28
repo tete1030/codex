@@ -1196,6 +1196,10 @@ impl Session {
         previous: Option<&Arc<TurnContext>>,
         next: &TurnContext,
     ) -> Option<ResponseItem> {
+        let prompt_layers = next.client.config().prompt.layers.clone();
+        if !prompt_layers.environment_context {
+            return None;
+        }
         let prev = previous?;
 
         let shell = self.user_shell();
@@ -1216,6 +1220,10 @@ impl Session {
         previous: Option<&Arc<TurnContext>>,
         next: &TurnContext,
     ) -> Option<ResponseItem> {
+        let prompt_layers = next.client.config().prompt.layers.clone();
+        if !prompt_layers.developer_instructions {
+            return None;
+        }
         let prev = previous?;
         if prev.sandbox_policy == next.sandbox_policy
             && prev.approval_policy == next.approval_policy
@@ -1785,31 +1793,35 @@ impl Session {
         turn_context: &TurnContext,
     ) -> Vec<ResponseItem> {
         let mut items = Vec::<ResponseItem>::with_capacity(4);
+        let prompt_layers = turn_context.client.config().prompt.layers.clone();
         let shell = self.user_shell();
-        items.push(
-            DeveloperInstructions::from_policy(
-                &turn_context.sandbox_policy,
-                turn_context.approval_policy,
-                self.services.exec_policy.current().as_ref(),
-                self.features.enabled(Feature::RequestRule),
-                &turn_context.cwd,
-            )
-            .into(),
-        );
-        if let Some(developer_instructions) = turn_context.developer_instructions.as_deref() {
-            items.push(DeveloperInstructions::new(developer_instructions.to_string()).into());
+        if prompt_layers.developer_instructions {
+            items.push(
+                DeveloperInstructions::from_policy(
+                    &turn_context.sandbox_policy,
+                    turn_context.approval_policy,
+                    self.services.exec_policy.current().as_ref(),
+                    self.features.enabled(Feature::RequestRule),
+                    &turn_context.cwd,
+                )
+                .into(),
+            );
+            if let Some(developer_instructions) = turn_context.developer_instructions.as_deref() {
+                items.push(DeveloperInstructions::new(developer_instructions.to_string()).into());
+            }
+            let collaboration_mode = {
+                let state = self.state.lock().await;
+                state.session_configuration.collaboration_mode.clone()
+            };
+            if let Some(collab_instructions) =
+                DeveloperInstructions::from_collaboration_mode(&collaboration_mode)
+            {
+                items.push(collab_instructions.into());
+            }
         }
-        // Add developer instructions from collaboration_mode if they exist and are non-empty
-        let collaboration_mode = {
-            let state = self.state.lock().await;
-            state.session_configuration.collaboration_mode.clone()
-        };
-        if let Some(collab_instructions) =
-            DeveloperInstructions::from_collaboration_mode(&collaboration_mode)
+        if prompt_layers.user_instructions
+            && let Some(user_instructions) = turn_context.user_instructions.as_deref()
         {
-            items.push(collab_instructions.into());
-        }
-        if let Some(user_instructions) = turn_context.user_instructions.as_deref() {
             items.push(
                 UserInstructions {
                     text: user_instructions.to_string(),
@@ -1818,10 +1830,12 @@ impl Session {
                 .into(),
             );
         }
-        items.push(ResponseItem::from(EnvironmentContext::new(
-            Some(turn_context.cwd.clone()),
-            shell.as_ref().clone(),
-        )));
+        if prompt_layers.environment_context {
+            items.push(ResponseItem::from(EnvironmentContext::new(
+                Some(turn_context.cwd.clone()),
+                shell.as_ref().clone(),
+            )));
+        }
         items
     }
 
@@ -3403,11 +3417,20 @@ async fn run_sampling_request(
         .get_model_info()
         .supports_parallel_tool_calls;
 
-    let base_instructions = sess.get_base_instructions().await;
+    let prompt_layers = turn_context.client.config().prompt.layers.clone();
+    let mut base_instructions = sess.get_base_instructions().await;
+    if !prompt_layers.base_instructions {
+        base_instructions.text.clear();
+    }
 
+    let tools = if prompt_layers.tool_schemas {
+        router.specs()
+    } else {
+        Vec::new()
+    };
     let prompt = Prompt {
         input,
-        tools: router.specs(),
+        tools,
         parallel_tool_calls: model_supports_parallel,
         base_instructions,
         personality: turn_context.personality,

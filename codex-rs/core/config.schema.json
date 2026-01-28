@@ -687,6 +687,65 @@
       },
       "type": "object"
     },
+    "PromptConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "layers": {
+          "$ref": "#/definitions/PromptLayersConfigToml"
+        },
+        "log_path": {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "rewrite": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PromptRewriteRule"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "PromptLayersConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "base_instructions": {
+          "type": "boolean"
+        },
+        "developer_instructions": {
+          "type": "boolean"
+        },
+        "environment_context": {
+          "type": "boolean"
+        },
+        "system_reminder": {
+          "type": "boolean"
+        },
+        "tool_schemas": {
+          "type": "boolean"
+        },
+        "user_instructions": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "PromptRewriteRule": {
+      "additionalProperties": false,
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "replace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern",
+        "replace"
+      ],
+      "type": "object"
+    },
     "RawMcpServerConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1428,6 +1487,23 @@
         "$ref": "#/definitions/ProjectConfig"
       },
       "type": "object"
+    },
+    "prompt": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PromptConfigToml"
+        }
+      ],
+      "default": {
+        "layers": null,
+        "log_path": null,
+        "rewrite": []
+      },
+      "description": "Prompt logging, layer control, and rewrite settings."
+    },
+    "responses_stream": {
+      "description": "Whether Responses API requests should be streamed (HTTP/WS).",
+      "type": "boolean"
     },
     "review_model": {
       "description": "Review model override used by the `/review` feature.",

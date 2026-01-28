@@ -11,6 +11,9 @@ use crate::config::types::Notifications;
 use crate::config::types::OtelConfig;
 use crate::config::types::OtelConfigToml;
 use crate::config::types::OtelExporterKind;
+use crate::config::types::PromptConfig;
+use crate::config::types::PromptConfigToml;
+use crate::config::types::PromptLayersConfig;
 use crate::config::types::SandboxWorkspaceWrite;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::config::types::ShellEnvironmentPolicyToml;
@@ -169,6 +172,12 @@ pub struct Config {
 
     /// Compact prompt override.
     pub compact_prompt: Option<String>,
+
+    /// Whether Responses API requests should be streamed (HTTP/WS).
+    pub responses_stream: bool,
+
+    /// Prompt logging, layer control, and rewrite settings.
+    pub prompt: PromptConfig,
 
     /// Optional external notifier command. When set, Codex will spawn this
     /// program after each completed *turn* (i.e. when the agent finishes
@@ -804,6 +813,13 @@ pub struct ConfigToml {
     /// Compact prompt used for history compaction.
     pub compact_prompt: Option<String>,
 
+    /// Whether Responses API requests should be streamed (HTTP/WS).
+    pub responses_stream: Option<bool>,
+
+    /// Prompt logging, layer control, and rewrite settings.
+    #[serde(default)]
+    pub prompt: PromptConfigToml,
+
     /// When set, restricts ChatGPT login to a specific workspace identifier.
     #[serde(default)]
     pub forced_chatgpt_workspace_id: Option<String>,
@@ -1367,6 +1383,8 @@ impl Config {
             || config_profile.sandbox_mode.is_some()
             || cfg.sandbox_mode.is_some();
 
+        let prompt = resolve_prompt_config(&cfg);
+
         let mut model_providers = built_in_model_providers();
         if features.enabled(Feature::ResponsesWebsockets)
             && let Some(provider) = model_providers.get_mut("openai")
@@ -1485,9 +1503,10 @@ impl Config {
         )?;
         let compact_prompt = compact_prompt.or(file_compact_prompt);
 
-        let review_model = override_review_model.or(cfg.review_model);
+        let review_model = override_review_model.or(cfg.review_model.clone());
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
+        let responses_stream = cfg.responses_stream.unwrap_or(true);
 
         // Ensure that every field of ConfigRequirements is applied to the final
         // Config.
@@ -1526,6 +1545,8 @@ impl Config {
             model_personality,
             developer_instructions,
             compact_prompt,
+            responses_stream,
+            prompt,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
             cli_auth_credentials_store_mode: cfg.cli_auth_credentials_store.unwrap_or_default(),
@@ -1719,6 +1740,27 @@ fn toml_uses_deprecated_instructions_file(value: &TomlValue) -> bool {
             profile_table.contains_key("experimental_instructions_file")
         })
     })
+}
+
+fn resolve_prompt_config(cfg: &ConfigToml) -> PromptConfig {
+    let prompt = &cfg.prompt;
+    let layers = prompt.layers.clone().unwrap_or_default();
+    let resolved_layers = PromptLayersConfig {
+        base_instructions: layers.base_instructions.unwrap_or(true),
+        developer_instructions: layers.developer_instructions.unwrap_or(true),
+        user_instructions: layers.user_instructions.unwrap_or(true),
+        tool_schemas: layers.tool_schemas.unwrap_or(true),
+        environment_context: layers.environment_context.unwrap_or(true),
+        system_reminder: layers.system_reminder.unwrap_or(true),
+    };
+    PromptConfig {
+        log_path: prompt
+            .log_path
+            .as_ref()
+            .map(|path| path.as_path().to_path_buf()),
+        layers: resolved_layers,
+        rewrite: prompt.rewrite.clone(),
+    }
 }
 
 /// Returns the path to the Codex configuration directory, which can be
@@ -3773,6 +3815,8 @@ model_verbosity = "high"
                 base_instructions: None,
                 developer_instructions: None,
                 compact_prompt: None,
+                responses_stream: true,
+                prompt: PromptConfig::default(),
                 forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
                 include_apply_patch_tool: false,
@@ -3856,6 +3900,8 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
+            responses_stream: true,
+            prompt: PromptConfig::default(),
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
@@ -3954,6 +4000,8 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
+            responses_stream: true,
+            prompt: PromptConfig::default(),
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
@@ -4038,6 +4086,8 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
+            responses_stream: true,
+            prompt: PromptConfig::default(),
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
